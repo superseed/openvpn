@@ -156,6 +156,46 @@ send_control(int fd, int code)
     }
 }
 
+static char *
+recv_string(int fd)
+{
+    size_t length;
+    ssize_t size = read(fd, &length, sizeof(size_t));
+    if (size != sizeof(size_t))
+    {
+        return NULL;
+    }
+    char *string = calloc(length, sizeof(char));
+    size = read(fd, string, length);
+    if (size == length)
+    {
+        return string;
+    }
+    else
+    {
+        return NULL;
+    }
+}
+
+static int
+send_string(int fd, const char *string, size_t length)
+{
+    ssize_t size = write(fd, &length, sizeof(size_t));
+    if (size != sizeof(size_t))
+    {
+        return -1;
+    }
+    size = write(fd, string, length);
+    if (size == length)
+    {
+        return (int) sizeof(size_t) + (int) size;
+    }
+    else
+    {
+        return -1;
+    }
+}
+
 /*
  * Daemonize if "daemon" env var is true.
  * Preserve stderr across daemonization if
@@ -417,9 +457,27 @@ openvpn_plugin_func_v1(openvpn_plugin_handle_t handle, const int type, const cha
     }
     else if (type == OPENVPN_PLUGIN_DOWN && context->foreground_fd >= 0)
     {
+        int i, total_string_length = 0, argv_length = string_array_len(argv);
+        for (i = 0; i < argv_length; i++)
+        {
+            total_string_length += strlen(argv[i]);
+        }
+        char *arguments = calloc(total_string_length, sizeof(char));
+        int offset = 0;
+        size_t arg_length;
+        for (i = 0; i < argv_length; i++)
+        {
+            arg_length = strlen(argv[i]);
+            strncpy(arguments + offset, argv[i], arg_length);
+        }
+        warn(arguments);
         if (send_control(context->foreground_fd, COMMAND_RUN_SCRIPT) == -1)
         {
             warn("DOWN-ROOT: Error sending script execution signal to background process");
+        }
+        else if(send_string(context->foreground_fd, arguments, strlen(arguments)) == -1)
+        {
+            warn("DOWN-ROOT: Error sending script execution arguments to background process");
         }
         else
         {
@@ -433,6 +491,7 @@ openvpn_plugin_func_v1(openvpn_plugin_handle_t handle, const int type, const cha
                 warn("DOWN-ROOT: Error receiving script execution confirmation from background process");
             }
         }
+        free(arguments);
     }
     return OPENVPN_PLUGIN_FUNC_ERROR;
 }
@@ -512,6 +571,7 @@ down_root_server(const int fd, char *const *argv, char *const *envp, const int v
     {
         int command_code;
         int exit_code = -1;
+        char *arguments = NULL;
 
         /* get a command from foreground process */
         command_code = recv_control(fd);
@@ -524,6 +584,8 @@ down_root_server(const int fd, char *const *argv, char *const *envp, const int v
         switch (command_code)
         {
             case COMMAND_RUN_SCRIPT:
+                // receive arguments, split them on comma, add to script args
+                arguments = recv_string(fd);
                 if ( (exit_code = run_script(argv, envp)) == 0) /* Succeeded */
                 {
                     if (send_control(fd, RESPONSE_SCRIPT_SUCCEEDED) == -1)
@@ -541,6 +603,7 @@ down_root_server(const int fd, char *const *argv, char *const *envp, const int v
                         goto done;
                     }
                 }
+                free(arguments);
                 break;
 
             case COMMAND_EXIT:
